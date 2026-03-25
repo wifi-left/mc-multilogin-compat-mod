@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "id": "mc-multilogin-compat",
+  "version": "${version}",
+  "name": "MC MultiLogin Compat Mod",
+  "description": "Fabric server-side mod that integrates with MC-MultiLogin-service for detailed login error messages and duplicate-name auto-renaming.",
+  "authors": [
+    "wifi-left"
+  ],
+  "contact": {
+    "sources": "https://github.com/wifi-left/mc-multilogin-compat-mod"
+  },
+  "license": "MIT",
+  "environment": "server",
+  "entrypoints": {
+    "main": [
+      "net.wifil.mcmultilogin.McMultiloginCompatMod"
+    ]
+  },
+  "mixins": [
+    "mc-multilogin-compat.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=0.14.0",
+    "fabric-api": "*",
+    "minecraft": "~1.21.1"
+  }
+}

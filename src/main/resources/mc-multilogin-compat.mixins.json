@@ -1,0 +1,12 @@
+{
+  "required": true,
+  "package": "net.wifil.mcmultilogin.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "YggdrasilSessionServiceMixin",
+    "ServerLoginPacketListenerMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
