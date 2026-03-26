@@ -1,4 +1,4 @@
-"# mc-multilogin-compat-mod
+# mc-multilogin-compat-mod
 
 A Fabric server-side mod for Minecraft **1.21.1** (Mojang mappings) that integrates with
 [MC-MultiLogin-service](https://github.com/wifi-left/MC-MultiLogin-service).
@@ -48,4 +48,4 @@ We suggest you to use this with [Authlib-Injector](https://github.com/yushijinhu
 ./gradlew build
 ```
 
-The output JAR will be in `build/libs/`." 
+The output JAR will be in `build/libs/`.
