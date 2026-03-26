@@ -44,7 +44,7 @@ public class LoginApiClient {
     public ApiResult hasJoined(String username, String serverId, InetAddress address,
                                boolean detail) throws IOException, InterruptedException {
         StringBuilder url = new StringBuilder(apiBase)
-                .append("/session/minecraft/hasJoined?username=")
+                .append("/sessionserver/session/minecraft/hasJoined?username=")
                 .append(URLEncoder.encode(username, StandardCharsets.UTF_8))
                 .append("&serverId=")
                 .append(URLEncoder.encode(serverId, StandardCharsets.UTF_8));
