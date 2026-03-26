@@ -3,6 +3,8 @@
 A Fabric server-side mod for Minecraft **1.21.1** (Mojang mappings) that integrates with
 [MC-MultiLogin-service](https://github.com/wifi-left/MC-MultiLogin-service).
 
+We suggest you to use this with [Authlib-Injector](https://github.com/yushijinhun/authlib-injector/). This mod only change the login method and the login-failed message.
+
 ## Features
 
 - On every player login the mod calls the configured MC-MultiLogin-service endpoint with
