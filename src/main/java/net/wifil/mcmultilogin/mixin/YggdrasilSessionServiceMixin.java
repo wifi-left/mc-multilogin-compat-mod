@@ -181,7 +181,18 @@ public class YggdrasilSessionServiceMixin {
                     String propValue = propObj.has("value")     ? propObj.get("value").getAsString()     : null;
                     String signature = propObj.has("signature") ? propObj.get("signature").getAsString() : null;
                     if (propName != null && propValue != null) {
-                        profile.getProperties().put(propName, new Property(propName, propValue, signature));
+                        try {
+                            profile.getProperties().put(propName, new Property(propName, propValue, signature));
+                        } catch (Throwable t) {
+                            // authlib-injector may transform GameProfile in a way that makes
+                            // getProperties() unavailable or incompatible with the compiled
+                            // PropertyMap return type.  Skip the property so login still
+                            // succeeds; the client will reload skin data via a subsequent
+                            // getProfile() call handled by authlib-injector itself.
+                            McMultiloginCompatMod.LOGGER.warn(
+                                    "[MultiLogin] authlib-injector compat: cannot set profile property '{}' – {}",
+                                    propName, t.getMessage());
+                        }
                     }
                 }
             }
