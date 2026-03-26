@@ -2,7 +2,8 @@ package net.wifil.mcmultilogin;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
-import net.fabricmc.api.ModInitializer;
+
+import net.fabricmc.api.DedicatedServerModInitializer;
 import net.fabricmc.loader.api.FabricLoader;
 import net.wifil.mcmultilogin.api.LoginApiClient;
 import net.wifil.mcmultilogin.config.ModConfig;
@@ -15,7 +16,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.ConcurrentHashMap;
 
-public class McMultiloginCompatMod implements ModInitializer {
+public class McMultiloginCompatMod implements DedicatedServerModInitializer {
 
     public static final Logger LOGGER = LoggerFactory.getLogger("mc-multilogin-compat");
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
@@ -33,7 +34,7 @@ public class McMultiloginCompatMod implements ModInitializer {
     private static PlayerNameTracker nameTracker;
 
     @Override
-    public void onInitialize() {
+    public void onInitializeServer() {
         Path configPath = FabricLoader.getInstance().getConfigDir()
                 .resolve("mc-multilogin-compat.json");
 
@@ -100,4 +101,5 @@ public class McMultiloginCompatMod implements ModInitializer {
         }
         return defaults;
     }
+
 }
