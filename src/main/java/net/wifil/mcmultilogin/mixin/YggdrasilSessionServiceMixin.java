@@ -17,28 +17,32 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
+import java.lang.reflect.Method;
 import java.net.InetAddress;
 import java.util.UUID;
 
 /**
  * Intercepts {@link YggdrasilMinecraftSessionService#hasJoinedServer} to:
  * <ol>
- *   <li>Call the MC-MultiLogin-service with {@code detail=true} so that
- *       authentication failures carry a human-readable reason.</li>
- *   <li>On {@code DUPLICATE_NAME} (when {@code autoRename} is enabled),
- *       automatically retry with the service-suggested {@code availableId}
- *       and record the rename in the persistent tracker.</li>
- *   <li>On any other 403, store the error message for the disconnect-packet
- *       mixin to forward to the client.</li>
+ * <li>Call the MC-MultiLogin-service with {@code detail=true} so that
+ * authentication failures carry a human-readable reason.</li>
+ * <li>On {@code DUPLICATE_NAME} (when {@code autoRename} is enabled),
+ * automatically retry with the service-suggested {@code availableId}
+ * and record the rename in the persistent tracker.</li>
+ * <li>On any other 403, store the error message for the disconnect-packet
+ * mixin to forward to the client.</li>
  * </ol>
  *
- * <p>{@code remap = false} because {@code com.mojang.authlib} uses stable
- * library names that are not part of the Mojang/Yarn mapping pipeline.</p>
+ * <p>
+ * {@code remap = false} because {@code com.mojang.authlib} uses stable
+ * library names that are not part of the Mojang/Yarn mapping pipeline.
+ * </p>
  */
 @Mixin(value = YggdrasilMinecraftSessionService.class, remap = false)
 public class YggdrasilSessionServiceMixin {
 
     private static final Gson GSON = new Gson();
+    private static final Method GAME_PROFILE_GET_PROPERTIES_METHOD = findGetPropertiesMethod();
 
     @Inject(method = "hasJoinedServer", at = @At("HEAD"), cancellable = true)
     private void multilogin$hasJoinedServer(
@@ -75,7 +79,8 @@ public class YggdrasilSessionServiceMixin {
                 ErrorResponse error = client.parseError(result.body());
                 String cause = error.getCause();
                 String errorMsg = error.getErrorMessage() != null
-                        ? error.getErrorMessage() : "Login rejected by authentication service.";
+                        ? error.getErrorMessage()
+                        : "Login rejected by authentication service.";
 
                 // ---- DUPLICATE_NAME: optionally auto-rename --------------------
                 if (error.isDuplicateName()
@@ -89,8 +94,7 @@ public class YggdrasilSessionServiceMixin {
                             username, availableId);
 
                     try {
-                        LoginApiClient.ApiResult retryResult =
-                                client.hasJoined(availableId, serverId, address, false);
+                        LoginApiClient.ApiResult retryResult = client.hasJoined(availableId, serverId, address, false);
 
                         if (retryResult.isSuccess()) {
                             ProfileResult renamedProfile = parseProfileResult(retryResult.body());
@@ -164,11 +168,13 @@ public class YggdrasilSessionServiceMixin {
         }
         try {
             JsonObject obj = GSON.fromJson(json, JsonObject.class);
-            if (obj == null) return null;
+            if (obj == null)
+                return null;
 
             String rawId = obj.has("id") ? obj.get("id").getAsString() : null;
-            String name  = obj.has("name") ? obj.get("name").getAsString() : null;
-            if (rawId == null || name == null) return null;
+            String name = obj.has("name") ? obj.get("name").getAsString() : null;
+            if (rawId == null || name == null)
+                return null;
 
             UUID uuid = parseUuid(rawId);
             GameProfile profile = new GameProfile(uuid, name);
@@ -177,22 +183,11 @@ public class YggdrasilSessionServiceMixin {
             if (properties != null) {
                 for (JsonElement elem : properties) {
                     JsonObject propObj = elem.getAsJsonObject();
-                    String propName  = propObj.has("name")      ? propObj.get("name").getAsString()      : null;
-                    String propValue = propObj.has("value")     ? propObj.get("value").getAsString()     : null;
+                    String propName = propObj.has("name") ? propObj.get("name").getAsString() : null;
+                    String propValue = propObj.has("value") ? propObj.get("value").getAsString() : null;
                     String signature = propObj.has("signature") ? propObj.get("signature").getAsString() : null;
                     if (propName != null && propValue != null) {
-                        try {
-                            profile.getProperties().put(propName, new Property(propName, propValue, signature));
-                        } catch (Throwable t) {
-                            // authlib-injector may transform GameProfile in a way that makes
-                            // getProperties() unavailable or incompatible with the compiled
-                            // PropertyMap return type.  Skip the property so login still
-                            // succeeds; the client will reload skin data via a subsequent
-                            // getProfile() call handled by authlib-injector itself.
-                            McMultiloginCompatMod.LOGGER.warn(
-                                    "[MultiLogin] authlib-injector compat: cannot set profile property '{}' – {}",
-                                    propName, t.getMessage());
-                        }
+                        putProfileProperty(profile, propName, propValue, signature);
                     }
                 }
             }
@@ -211,5 +206,35 @@ public class YggdrasilSessionServiceMixin {
         }
         return UUID.fromString(
                 raw.replaceAll("(\\w{8})(\\w{4})(\\w{4})(\\w{4})(\\w{12})", "$1-$2-$3-$4-$5"));
+    }
+
+    private static Method findGetPropertiesMethod() {
+        try {
+            Method method = GameProfile.class.getMethod("getProperties");
+            method.setAccessible(true);
+            return method;
+        } catch (ReflectiveOperationException e) {
+            McMultiloginCompatMod.LOGGER.warn(
+                    "[MultiLogin] authlib-injector compat: GameProfile#getProperties not found: {}", e);
+            return null;
+        }
+    }
+
+    private static void putProfileProperty(GameProfile profile, String name, String value, String signature) {
+        if (GAME_PROFILE_GET_PROPERTIES_METHOD == null) {
+            McMultiloginCompatMod.LOGGER.debug(
+                    "[MultiLogin] authlib-injector compat: skip property '{}' because getProperties is unavailable.",
+                    name);
+            return;
+        }
+        try {
+            Object properties = GAME_PROFILE_GET_PROPERTIES_METHOD.invoke(profile);
+            Method putMethod = properties.getClass().getMethod("put", Object.class, Object.class);
+            putMethod.invoke(properties, name, new Property(name, value, signature));
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            McMultiloginCompatMod.LOGGER.warn(
+                    "[MultiLogin] authlib-injector compat: cannot set profile property '{}' – {}",
+                    name, e.getMessage(), e);
+        }
     }
 }
