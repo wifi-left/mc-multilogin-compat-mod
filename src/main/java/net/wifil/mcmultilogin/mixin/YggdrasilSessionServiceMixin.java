@@ -17,8 +17,11 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.net.InetAddress;
+import java.util.Arrays;
 import java.util.UUID;
 
 /**
@@ -42,7 +45,9 @@ import java.util.UUID;
 public class YggdrasilSessionServiceMixin {
 
     private static final Gson GSON = new Gson();
-    private static final Method GAME_PROFILE_GET_PROPERTIES_METHOD = findGetPropertiesMethod();
+    private static final Method GAME_PROFILE_PROPERTIES_METHOD = findGetPropertiesMethod();
+    private static final Field GAME_PROFILE_PROPERTIES_FIELD = findPropertiesField();
+    private static final Constructor<?> GAME_PROFILE_CONSTRUCTOR_WITH_PROPERTIES = findGameProfileConstructorWithProperties();
 
     @Inject(method = "hasJoinedServer", at = @At("HEAD"), cancellable = true)
     private void multilogin$hasJoinedServer(
@@ -177,7 +182,10 @@ public class YggdrasilSessionServiceMixin {
                 return null;
 
             UUID uuid = parseUuid(rawId);
-            GameProfile profile = new GameProfile(uuid, name);
+            GameProfile profile = createProfile(uuid, name);
+            if (profile == null) {
+                return null;
+            }
 
             JsonArray properties = obj.has("properties") ? obj.getAsJsonArray("properties") : null;
             if (properties != null) {
@@ -209,27 +217,113 @@ public class YggdrasilSessionServiceMixin {
     }
 
     private static Method findGetPropertiesMethod() {
+        for (String methodName : new String[] { "getProperties", "properties" }) {
+            try {
+                Method method = GameProfile.class.getMethod(methodName);
+                method.setAccessible(true);
+                return method;
+            } catch (ReflectiveOperationException ignored) {
+                // Try next candidate.
+            }
+        }
+        return null;
+    }
+
+    private static Constructor<?> findGameProfileConstructorWithProperties() {
+        for (Constructor<?> constructor : GameProfile.class.getConstructors()) {
+            Class<?>[] parameterTypes = constructor.getParameterTypes();
+            if (parameterTypes.length == 3
+                    && UUID.class.equals(parameterTypes[0])
+                    && String.class.equals(parameterTypes[1])) {
+                constructor.setAccessible(true);
+                return constructor;
+            }
+        }
+        return null;
+    }
+
+    private static GameProfile createProfile(UUID uuid, String name) {
+        if (GAME_PROFILE_CONSTRUCTOR_WITH_PROPERTIES != null) {
+            try {
+                Class<?> propertiesType = GAME_PROFILE_CONSTRUCTOR_WITH_PROPERTIES.getParameterTypes()[2];
+                Object properties = propertiesType.getDeclaredConstructor().newInstance();
+                return (GameProfile) GAME_PROFILE_CONSTRUCTOR_WITH_PROPERTIES.newInstance(uuid, name, properties);
+            } catch (ReflectiveOperationException e) {
+                McMultiloginCompatMod.LOGGER.debug(
+                        "[MultiLogin] authlib-injector compat: cannot use 3-arg GameProfile constructor: {}",
+                        e.getMessage());
+            }
+        }
         try {
-            Method method = GameProfile.class.getMethod("getProperties");
-            method.setAccessible(true);
-            return method;
-        } catch (ReflectiveOperationException e) {
+            return new GameProfile(uuid, name);
+        } catch (RuntimeException e) {
             McMultiloginCompatMod.LOGGER.warn(
-                    "[MultiLogin] authlib-injector compat: GameProfile#getProperties not found: {}", e);
+                    "[MultiLogin] authlib-injector compat: cannot create GameProfile({}, {}): {}",
+                    uuid, name, e.getMessage(), e);
             return null;
         }
     }
 
+    private static Field findPropertiesField() {
+        for (String fieldName : new String[] { "properties" }) {
+            try {
+                Field field = GameProfile.class.getDeclaredField(fieldName);
+                field.setAccessible(true);
+                return field;
+            } catch (ReflectiveOperationException ignored) {
+                // Try next candidate.
+            }
+        }
+        if (GAME_PROFILE_PROPERTIES_METHOD == null) {
+            McMultiloginCompatMod.LOGGER.warn(
+                    "[MultiLogin] authlib-injector compat: no GameProfile properties accessor found. methods={}",
+                    Arrays.toString(Arrays.stream(GameProfile.class.getMethods()).map(Method::getName).distinct().toArray()));
+        }
+        return null;
+    }
+
+    private static Object getProfileProperties(GameProfile profile) throws ReflectiveOperationException {
+        if (GAME_PROFILE_PROPERTIES_METHOD != null) {
+            return GAME_PROFILE_PROPERTIES_METHOD.invoke(profile);
+        }
+        if (GAME_PROFILE_PROPERTIES_FIELD != null) {
+            return GAME_PROFILE_PROPERTIES_FIELD.get(profile);
+        }
+        return null;
+    }
+
+    private static Method findPutMethod(Class<?> propertiesClass) {
+        for (Method method : propertiesClass.getMethods()) {
+            if ("put".equals(method.getName()) && method.getParameterCount() == 2) {
+                method.setAccessible(true);
+                return method;
+            }
+        }
+        return null;
+    }
+
     private static void putProfileProperty(GameProfile profile, String name, String value, String signature) {
-        if (GAME_PROFILE_GET_PROPERTIES_METHOD == null) {
+        if (GAME_PROFILE_PROPERTIES_METHOD == null && GAME_PROFILE_PROPERTIES_FIELD == null) {
             McMultiloginCompatMod.LOGGER.debug(
-                    "[MultiLogin] authlib-injector compat: skip property '{}' because getProperties is unavailable.",
+                    "[MultiLogin] authlib-injector compat: skip property '{}' because GameProfile properties accessor is unavailable.",
                     name);
             return;
         }
         try {
-            Object properties = GAME_PROFILE_GET_PROPERTIES_METHOD.invoke(profile);
-            Method putMethod = properties.getClass().getMethod("put", Object.class, Object.class);
+            Object properties = getProfileProperties(profile);
+            if (properties == null) {
+                McMultiloginCompatMod.LOGGER.debug(
+                        "[MultiLogin] authlib-injector compat: skip property '{}' because properties container is null.",
+                        name);
+                return;
+            }
+            Method putMethod = findPutMethod(properties.getClass());
+            if (putMethod == null) {
+                McMultiloginCompatMod.LOGGER.warn(
+                        "[MultiLogin] authlib-injector compat: no put(name,value) on properties class '{}'.",
+                        properties.getClass().getName());
+                return;
+            }
             putMethod.invoke(properties, name, new Property(name, value, signature));
         } catch (ReflectiveOperationException | RuntimeException e) {
             McMultiloginCompatMod.LOGGER.warn(
