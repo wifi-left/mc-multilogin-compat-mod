@@ -21,7 +21,7 @@
     "mc-multilogin-compat.mixins.json"
   ],
   "depends": {
-    "fabricloader": ">=0.14.0",
-    "minecraft": ">=1.16"
+    "fabricloader": "*",
+    "minecraft": ">=26.1"
   }
 }
