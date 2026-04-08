@@ -18,10 +18,8 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 import java.lang.reflect.Constructor;
-import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.net.InetAddress;
-import java.util.Arrays;
 import java.util.UUID;
 
 /**
@@ -45,9 +43,8 @@ import java.util.UUID;
 public class YggdrasilSessionServiceMixin {
 
     private static final Gson GSON = new Gson();
-    private static final Method GAME_PROFILE_PROPERTIES_METHOD = findGetPropertiesMethod();
-    private static final Field GAME_PROFILE_PROPERTIES_FIELD = findPropertiesField();
-    private static final Constructor<?> GAME_PROFILE_CONSTRUCTOR_WITH_PROPERTIES = findGameProfileConstructorWithProperties();
+    private static final Constructor<?> GAME_PROFILE_CONSTRUCTOR_WITH_PROPERTIES =
+            findGameProfileConstructorWithProperties();
 
     @Inject(method = "hasJoinedServer", at = @At("HEAD"), cancellable = true)
     private void multilogin$hasJoinedServer(
@@ -69,14 +66,11 @@ public class YggdrasilSessionServiceMixin {
             LoginApiClient.ApiResult result = client.hasJoined(username, serverId, address, true);
 
             if (result.isSuccess()) {
-                // Happy path: parse the GameProfile and short-circuit the
-                // original Yggdrasil HTTP call (saves a redundant round-trip).
                 ProfileResult profile = parseProfileResult(result.body());
                 if (profile != null) {
                     cir.setReturnValue(profile);
                     cir.cancel();
                 }
-                // If parsing failed, fall through to the original method.
                 return;
             }
 
@@ -99,7 +93,8 @@ public class YggdrasilSessionServiceMixin {
                             username, availableId);
 
                     try {
-                        LoginApiClient.ApiResult retryResult = client.hasJoined(availableId, serverId, address, false);
+                        LoginApiClient.ApiResult retryResult =
+                                client.hasJoined(availableId, serverId, address, false);
 
                         if (retryResult.isSuccess()) {
                             ProfileResult renamedProfile = parseProfileResult(retryResult.body());
@@ -112,7 +107,6 @@ public class YggdrasilSessionServiceMixin {
                                 return;
                             }
                         }
-                        // Retry failed: fall through to showing the original error.
                         McMultiloginCompatMod.LOGGER.info(
                                 "[MultiLogin] Retry as '{}' also failed (status {}); showing original error.",
                                 availableId, retryResult.statusCode());
@@ -133,14 +127,10 @@ public class YggdrasilSessionServiceMixin {
             }
 
             // 204 or other non-200/403: standard "not found" — let null propagate
-            // through the normal path (don't cancel, let original method run OR
-            // handle the null result as vanilla would).
             if (result.statusCode() == 204) {
-                // Standard "player not found" response, no detail available.
                 cir.setReturnValue(null);
                 cir.cancel();
             }
-            // For any other unexpected status fall through to original method.
 
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
@@ -182,32 +172,49 @@ public class YggdrasilSessionServiceMixin {
                 return null;
 
             UUID uuid = parseUuid(rawId);
-            GameProfile profile = createProfile(uuid, name);
-            if (profile == null) {
-                return null;
+
+            // --- Build a mutable properties container before creating the profile ---
+            Object propertiesContainer = createMutablePropertiesContainer();
+            if (propertiesContainer == null) {
+                // Fallback: environment doesn't support mutable properties,
+                // create a plain profile without textures.
+                McMultiloginCompatMod.LOGGER.warn(
+                        "[MultiLogin] Cannot create mutable properties container; textures will be missing.");
+                GameProfile fallbackProfile = createProfileFallback(uuid, name);
+                return fallbackProfile != null ? new ProfileResult(fallbackProfile) : null;
             }
 
-            JsonArray properties = obj.has("properties") ? obj.getAsJsonArray("properties") : null;
-            if (properties != null) {
-                for (JsonElement elem : properties) {
+            JsonArray propertiesArray = obj.has("properties") ? obj.getAsJsonArray("properties") : null;
+            if (propertiesArray != null) {
+                for (JsonElement elem : propertiesArray) {
                     JsonObject propObj = elem.getAsJsonObject();
                     String propName = propObj.has("name") ? propObj.get("name").getAsString() : null;
                     String propValue = propObj.has("value") ? propObj.get("value").getAsString() : null;
                     String signature = propObj.has("signature") ? propObj.get("signature").getAsString() : null;
                     if (propName != null && propValue != null) {
-                        putProfileProperty(profile, propName, propValue, signature);
+                        Property prop = new Property(propName, propValue, signature);
+                        addPropertyToContainer(propertiesContainer, propName, prop);
                     }
                 }
             }
 
-            return new ProfileResult(profile);
+            // Create GameProfile using the 3-arg constructor (UUID, name, properties)
+            GameProfile profile = createProfileWithProperties(uuid, name, propertiesContainer);
+            if (profile == null) {
+                // Fallback if 3-arg constructor fails
+                profile = createProfileFallback(uuid, name);
+            }
+            return profile != null ? new ProfileResult(profile) : null;
+
         } catch (Exception e) {
             McMultiloginCompatMod.LOGGER.warn("[MultiLogin] Failed to parse profile JSON: {}", e.getMessage());
             return null;
         }
     }
 
-    /** Convert an un-hyphenated UUID hex string to a {@link UUID}. */
+    /**
+     * Convert an un-hyphenated UUID hex string to a {@link UUID}.
+     */
     private static UUID parseUuid(String raw) {
         if (raw.contains("-")) {
             return UUID.fromString(raw);
@@ -216,119 +223,82 @@ public class YggdrasilSessionServiceMixin {
                 raw.replaceAll("(\\w{8})(\\w{4})(\\w{4})(\\w{4})(\\w{12})", "$1-$2-$3-$4-$5"));
     }
 
-    private static Method findGetPropertiesMethod() {
-        for (String methodName : new String[] { "getProperties", "properties" }) {
-            try {
-                Method method = GameProfile.class.getMethod(methodName);
-                method.setAccessible(true);
-                return method;
-            } catch (ReflectiveOperationException ignored) {
-                // Try next candidate.
-            }
-        }
-        return null;
-    }
-
+    /**
+     * Attempts to find the three-argument constructor:
+     * {@code GameProfile(UUID, String, Multimap<String, Property>)}.
+     */
     private static Constructor<?> findGameProfileConstructorWithProperties() {
-        for (Constructor<?> constructor : GameProfile.class.getConstructors()) {
-            Class<?>[] parameterTypes = constructor.getParameterTypes();
-            if (parameterTypes.length == 3
-                    && UUID.class.equals(parameterTypes[0])
-                    && String.class.equals(parameterTypes[1])) {
-                constructor.setAccessible(true);
-                return constructor;
+        for (Constructor<?> ctor : GameProfile.class.getConstructors()) {
+            Class<?>[] paramTypes = ctor.getParameterTypes();
+            if (paramTypes.length == 3
+                    && paramTypes[0] == UUID.class
+                    && paramTypes[1] == String.class) {
+                ctor.setAccessible(true);
+                return ctor;
             }
         }
         return null;
     }
 
-    private static GameProfile createProfile(UUID uuid, String name) {
-        if (GAME_PROFILE_CONSTRUCTOR_WITH_PROPERTIES != null) {
-            try {
-                Class<?> propertiesType = GAME_PROFILE_CONSTRUCTOR_WITH_PROPERTIES.getParameterTypes()[2];
-                Object properties = propertiesType.getDeclaredConstructor().newInstance();
-                return (GameProfile) GAME_PROFILE_CONSTRUCTOR_WITH_PROPERTIES.newInstance(uuid, name, properties);
-            } catch (ReflectiveOperationException e) {
-                McMultiloginCompatMod.LOGGER.debug(
-                        "[MultiLogin] authlib-injector compat: cannot use 3-arg GameProfile constructor: {}",
-                        e.getMessage());
-            }
-        }
+    /**
+     * Creates a mutable Multimap suitable for holding {@link Property} objects.
+     * authlib expects a {@code com.google.common.collect.Multimap<String, Property>}.
+     * We use {@code LinkedHashMultimap.create()} which is mutable and preserves order.
+     */
+    private static Object createMutablePropertiesContainer() {
         try {
-            return new GameProfile(uuid, name);
-        } catch (RuntimeException e) {
-            McMultiloginCompatMod.LOGGER.warn(
-                    "[MultiLogin] authlib-injector compat: cannot create GameProfile({}, {}): {}",
-                    uuid, name, e.getMessage(), e);
+            Class<?> multimapClass = Class.forName("com.google.common.collect.LinkedHashMultimap");
+            Method createMethod = multimapClass.getMethod("create");
+            return createMethod.invoke(null);
+        } catch (Exception e) {
+            McMultiloginCompatMod.LOGGER.error(
+                    "[MultiLogin] Failed to create mutable properties container: {}", e.getMessage());
             return null;
         }
     }
 
-    private static Field findPropertiesField() {
-        for (String fieldName : new String[] { "properties" }) {
-            try {
-                Field field = GameProfile.class.getDeclaredField(fieldName);
-                field.setAccessible(true);
-                return field;
-            } catch (ReflectiveOperationException ignored) {
-                // Try next candidate.
-            }
-        }
-        if (GAME_PROFILE_PROPERTIES_METHOD == null) {
+    /**
+     * Adds a property to the container via its {@code put(key, value)} method.
+     */
+    private static void addPropertyToContainer(Object container, String key, Property value) {
+        if (container == null) return;
+        try {
+            Method putMethod = container.getClass().getMethod("put", Object.class, Object.class);
+            putMethod.invoke(container, key, value);
+        } catch (Exception e) {
             McMultiloginCompatMod.LOGGER.warn(
-                    "[MultiLogin] authlib-injector compat: no GameProfile properties accessor found. methods={}",
-                    Arrays.toString(Arrays.stream(GameProfile.class.getMethods()).map(Method::getName).distinct().toArray()));
+                    "[MultiLogin] Failed to add property '{}' to container: {}", key, e.getMessage());
         }
-        return null;
     }
 
-    private static Object getProfileProperties(GameProfile profile) throws ReflectiveOperationException {
-        if (GAME_PROFILE_PROPERTIES_METHOD != null) {
-            return GAME_PROFILE_PROPERTIES_METHOD.invoke(profile);
-        }
-        if (GAME_PROFILE_PROPERTIES_FIELD != null) {
-            return GAME_PROFILE_PROPERTIES_FIELD.get(profile);
-        }
-        return null;
-    }
-
-    private static Method findPutMethod(Class<?> propertiesClass) {
-        for (Method method : propertiesClass.getMethods()) {
-            if ("put".equals(method.getName()) && method.getParameterCount() == 2) {
-                method.setAccessible(true);
-                return method;
-            }
-        }
-        return null;
-    }
-
-    private static void putProfileProperty(GameProfile profile, String name, String value, String signature) {
-        if (GAME_PROFILE_PROPERTIES_METHOD == null && GAME_PROFILE_PROPERTIES_FIELD == null) {
-            McMultiloginCompatMod.LOGGER.debug(
-                    "[MultiLogin] authlib-injector compat: skip property '{}' because GameProfile properties accessor is unavailable.",
-                    name);
-            return;
+    /**
+     * Creates a GameProfile using the three-argument constructor (UUID, name, properties).
+     */
+    private static GameProfile createProfileWithProperties(UUID uuid, String name, Object properties) {
+        if (GAME_PROFILE_CONSTRUCTOR_WITH_PROPERTIES == null) {
+            McMultiloginCompatMod.LOGGER.warn(
+                    "[MultiLogin] 3-arg GameProfile constructor not found. Textures will be missing.");
+            return null;
         }
         try {
-            Object properties = getProfileProperties(profile);
-            if (properties == null) {
-                McMultiloginCompatMod.LOGGER.debug(
-                        "[MultiLogin] authlib-injector compat: skip property '{}' because properties container is null.",
-                        name);
-                return;
-            }
-            Method putMethod = findPutMethod(properties.getClass());
-            if (putMethod == null) {
-                McMultiloginCompatMod.LOGGER.warn(
-                        "[MultiLogin] authlib-injector compat: no put(name,value) on properties class '{}'.",
-                        properties.getClass().getName());
-                return;
-            }
-            putMethod.invoke(properties, name, new Property(name, value, signature));
-        } catch (ReflectiveOperationException | RuntimeException e) {
+            return (GameProfile) GAME_PROFILE_CONSTRUCTOR_WITH_PROPERTIES.newInstance(uuid, name, properties);
+        } catch (Exception e) {
             McMultiloginCompatMod.LOGGER.warn(
-                    "[MultiLogin] authlib-injector compat: cannot set profile property '{}' – {}",
-                    name, e.getMessage(), e);
+                    "[MultiLogin] Failed to create GameProfile with properties: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Fallback: creates a plain GameProfile without textures using the two-argument constructor.
+     */
+    private static GameProfile createProfileFallback(UUID uuid, String name) {
+        try {
+            return new GameProfile(uuid, name);
+        } catch (Exception e) {
+            McMultiloginCompatMod.LOGGER.warn(
+                    "[MultiLogin] Failed to create fallback GameProfile: {}", e.getMessage());
+            return null;
         }
     }
 }
