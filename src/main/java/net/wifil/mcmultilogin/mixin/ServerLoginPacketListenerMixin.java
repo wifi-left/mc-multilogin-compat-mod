@@ -6,10 +6,8 @@ import net.wifil.mcmultilogin.McMultiloginCompatMod;
 import org.jetbrains.annotations.Nullable;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
-import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
-import org.spongepowered.asm.mixin.injection.Inject;
-import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import org.spongepowered.asm.mixin.injection.ModifyVariable;
 
 /**
  * Intercepts the login-phase {@code disconnect(Component)} in
@@ -27,44 +25,24 @@ public abstract class ServerLoginPacketListenerMixin {
     @Nullable
     private String requestedUsername;
 
-    /** Shadow the {@code disconnect} method so we can call it recursion-safely. */
-    @Shadow
-    public abstract void disconnect(Component reason);
-
-    /**
-     * {@code true} while we are re-calling {@code disconnect} with a custom
-     * message to prevent infinite recursion.
-     */
-    @Unique
-    private boolean multilogin$inCustomDisconnect = false;
-
-    @Inject(method = "disconnect(Lnet/minecraft/network/chat/Component;)V",
-            at = @At("HEAD"),
-            cancellable = true)
-    private void multilogin$onDisconnect(Component reason, CallbackInfo ci) {
-        // Prevent re-entry when we call disconnect ourselves below.
-        if (this.multilogin$inCustomDisconnect) {
-            return;
+    @ModifyVariable(method = "disconnect(Lnet/minecraft/network/chat/Component;)V", at = @At("HEAD"), argsOnly = true)
+    private Component multilogin$replaceDisconnectReason(Component originalReason) {
+        if (originalReason == null) {
+            return null;
         }
 
         String username = this.requestedUsername;
         if (username == null) {
-            return;
+            return originalReason;
         }
 
         String customMessage = McMultiloginCompatMod.PENDING_ERRORS.remove(username);
         if (customMessage == null) {
-            return;
+            return originalReason;
         }
 
-        // Cancel the generic "Failed to verify username!" disconnect and
-        // send the detailed reason instead.
-        ci.cancel();
-        this.multilogin$inCustomDisconnect = true;
-        try {
-            this.disconnect(Component.literal(customMessage));
-        } finally {
-            this.multilogin$inCustomDisconnect = false;
-        }
+        // 直接返回新消息，原版流程只会执行一次 disconnect，
+        // 完全避免了 ci.cancel() + 手动二次调用的风险。
+        return Component.literal(customMessage);
     }
 }
