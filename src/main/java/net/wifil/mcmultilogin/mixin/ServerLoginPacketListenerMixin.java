@@ -1,13 +1,17 @@
 package net.wifil.mcmultilogin.mixin;
 
+import net.minecraft.network.Connection;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.protocol.login.ClientboundLoginDisconnectPacket;
 import net.minecraft.server.network.ServerLoginPacketListenerImpl;
 import net.wifil.mcmultilogin.McMultiloginCompatMod;
 import org.jetbrains.annotations.Nullable;
+import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
-import org.spongepowered.asm.mixin.injection.ModifyVariable;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
  * Intercepts the login-phase {@code disconnect(Component)} in
@@ -24,25 +28,42 @@ public abstract class ServerLoginPacketListenerMixin {
     @Shadow
     @Nullable
     private String requestedUsername;
+    @Shadow
+    @Final
+    private Connection connection;
 
-    @ModifyVariable(method = "disconnect(Lnet/minecraft/network/chat/Component;)V", at = @At("HEAD"), argsOnly = true)
-    private Component multilogin$replaceDisconnectReason(Component originalReason) {
+    public boolean customDisconnect(final Component component) {
+        ServerLoginPacketListenerImpl impl = (ServerLoginPacketListenerImpl) (Object) this;
+        if (connection == null)
+            return false;
+        try {
+            McMultiloginCompatMod.LOGGER.info("Disconnecting {} with custom login failed message.", impl.getUserName());
+            connection.send(new ClientboundLoginDisconnectPacket(component));
+            connection.disconnect(component);
+        } catch (Exception e) {
+            McMultiloginCompatMod.LOGGER.error("Error whilst disconnecting player with custom reason", e);
+            return false;
+        }
+        return true;
+    }
+
+    @Inject(method = "disconnect(Lnet/minecraft/network/chat/Component;)V", at = @At("HEAD"), cancellable = true)
+    private void multilogin$replaceDisconnectReason(Component originalReason, CallbackInfo ci) {
         if (originalReason == null) {
-            return null;
+            return;
         }
 
         String username = this.requestedUsername;
         if (username == null) {
-            return originalReason;
+            return;
         }
 
         String customMessage = McMultiloginCompatMod.PENDING_ERRORS.remove(username);
         if (customMessage == null) {
-            return originalReason;
+            return;
         }
-
-        // 直接返回新消息，原版流程只会执行一次 disconnect，
-        // 完全避免了 ci.cancel() + 手动二次调用的风险。
-        return Component.literal(customMessage);
+        if (customDisconnect(Component.literal(customMessage))) {
+            ci.cancel();
+        }
     }
 }

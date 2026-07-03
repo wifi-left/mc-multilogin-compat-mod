@@ -112,7 +112,7 @@ public class YggdrasilSessionServiceMixin {
                 }
 
                 McMultiloginCompatMod.LOGGER.info(
-                        "[MultiLogin] Login rejected for '{}' (cause={}): {}", username, cause, errorMsg);
+                        "[MultiLogin] Login rejected for '{}' (cause={})", username, cause);
                 McMultiloginCompatMod.PENDING_ERRORS.put(username, errorMsg);
                 cir.setReturnValue(null);
                 cir.cancel();
